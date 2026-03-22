@@ -4,7 +4,7 @@ Crypto Alpha Hunter Bot
 - Feature 2: Search new accounts by keyword (under 7 or 30 days)
 - Feature 3: Free mint tracker — finds NFT free mint announcements
 - Feature 4: Established account tracker — any age, manual review
-- Platform: Twitter/X via twscrape (no API key needed)
+- Platform: Twitter/X via twscrape (cookie auth)
 - Alerts: Instant via Telegram
 """
 
@@ -12,12 +12,10 @@ import os
 import sqlite3
 import logging
 import asyncio
-import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from telegram import Update, Bot
 from telegram.ext import Application, CommandHandler, ContextTypes
-import twscrape
 from twscrape import API, gather
 from twscrape.logger import set_log_level
 
@@ -29,8 +27,8 @@ set_log_level("ERROR")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 X_USERNAME = os.environ.get("X_USERNAME")
-X_PASSWORD = os.environ.get("X_PASSWORD")
-X_EMAIL = os.environ.get("X_EMAIL")
+X_AUTH_TOKEN = os.environ.get("X_AUTH_TOKEN")
+X_CT0 = os.environ.get("X_CT0")
 DB_PATH = "cryptoalpha.db"
 
 # Age thresholds
@@ -45,18 +43,11 @@ FREE_MINT_KEYWORDS = [
     "0 cost mint", "no cost mint", "free wl"
 ]
 
-# Crypto discovery keywords
-CRYPTO_KEYWORDS = [
-    "blockchain", "defi", "nft", "web3", "crypto project",
-    "token launch", "mainnet", "testnet", "airdrop", "protocol"
-]
-
 # ── DATABASE ──────────────────────────────────────────────────────────────────
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
 
-    # Search terms
     c.execute("""
         CREATE TABLE IF NOT EXISTS search_terms (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,7 +58,6 @@ def init_db():
         )
     """)
 
-    # Pinned accounts to monitor
     c.execute("""
         CREATE TABLE IF NOT EXISTS pinned_accounts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,7 +69,6 @@ def init_db():
         )
     """)
 
-    # Seen accounts (to avoid duplicate alerts)
     c.execute("""
         CREATE TABLE IF NOT EXISTS seen_accounts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,7 +79,6 @@ def init_db():
         )
     """)
 
-    # Seen tweets from pinned accounts
     c.execute("""
         CREATE TABLE IF NOT EXISTS seen_tweets (
             tweet_id TEXT PRIMARY KEY,
@@ -220,12 +208,21 @@ def mark_tweet_seen(tweet_id, username):
     finally:
         conn.close()
 
-# ── TWSCRAPE SETUP ────────────────────────────────────────────────────────────
+# ── TWSCRAPE SETUP (COOKIE AUTH) ──────────────────────────────────────────────
 api = API()
 
 async def setup_account():
-    await api.pool.add_account(X_USERNAME, X_PASSWORD, X_EMAIL, X_PASSWORD)
-    await api.pool.login_all()
+    try:
+        await api.pool.add_account(
+            X_USERNAME,
+            password="placeholder",
+            email="placeholder@placeholder.com",
+            email_password="placeholder",
+            cookies=f"auth_token={X_AUTH_TOKEN}; ct0={X_CT0}"
+        )
+        logger.info("X account added via cookies successfully.")
+    except Exception as e:
+        logger.error(f"Failed to add X account: {e}")
 
 def account_age_days(created_at):
     now = datetime.now(timezone.utc)
@@ -234,10 +231,11 @@ def account_age_days(created_at):
 def format_account_alert(user, feature_label, extra=""):
     age = account_age_days(user.created)
     url = f"https://x.com/{user.username}"
+    bio = user.rawDescription[:100] if user.rawDescription else "No bio"
     return (
         f"🚨 *{feature_label}*\n\n"
         f"👤 [@{user.username}]({url})\n"
-        f"📝 {user.rawDescription[:100] if user.rawDescription else 'No bio'}...\n"
+        f"📝 {bio}\n"
         f"📅 Account age: *{age} days old*\n"
         f"👥 Followers: {user.followersCount:,}\n"
         f"🐦 Following: {user.friendsCount:,}\n"
@@ -273,7 +271,7 @@ async def run_feature1(bot: Bot):
                     user,
                     "🆕 NEW CRYPTO ACCOUNT FOUND",
                     f"🔍 Found via: `{term}`\n"
-                    f"💬 Tweet: {tweet.rawContent[:120]}...\n\n"
+                    f"💬 Tweet: {tweet.rawContent[:120]}\n\n"
                     f"👉 To track: /pin {user.username}"
                 )
                 await bot.send_message(
@@ -293,7 +291,7 @@ async def run_feature2(bot: Bot):
 
     for term, age_filter in terms:
         days_limit = VERY_NEW_ACCOUNT_DAYS if age_filter == "7days" else NEW_ACCOUNT_DAYS
-        label = f"{'⚡ UNDER 7 DAYS' if days_limit == 7 else '🆕 UNDER 30 DAYS'}"
+        label = "⚡ UNDER 7 DAYS" if days_limit == 7 else "🆕 UNDER 30 DAYS"
 
         try:
             tweets = await gather(api.search(f"{term} -is:retweet", limit=30))
@@ -316,7 +314,7 @@ async def run_feature2(bot: Bot):
                     user,
                     f"{label} ACCOUNT — KEYWORD MATCH",
                     f"🔍 Search term: `{term}`\n"
-                    f"💬 Tweet: {tweet.rawContent[:120]}..."
+                    f"💬 Tweet: {tweet.rawContent[:120]}"
                 )
                 await bot.send_message(
                     chat_id=CHAT_ID, text=msg,
@@ -351,8 +349,8 @@ async def run_feature3(bot: Bot):
                     user,
                     "🎨 FREE MINT ALERT",
                     f"🔑 Keyword: `{keyword}`\n"
-                    f"💬 Tweet: {tweet.rawContent[:150]}...\n"
-                    f"🔗 Tweet link: https://x.com/{user.username}/status/{tweet.id}"
+                    f"💬 Tweet: {tweet.rawContent[:150]}\n"
+                    f"🔗 https://x.com/{user.username}/status/{tweet.id}"
                 )
                 await bot.send_message(
                     chat_id=CHAT_ID, text=msg,
@@ -384,12 +382,11 @@ async def run_feature4(bot: Bot):
                     continue
 
                 mark_seen(user.username, 4)
-                age = account_age_days(user.created)
                 msg = format_account_alert(
                     user,
                     "🔎 ESTABLISHED ACCOUNT — REVIEW",
                     f"🔍 Search term: `{term}`\n"
-                    f"💬 Tweet: {tweet.rawContent[:120]}...\n\n"
+                    f"💬 Tweet: {tweet.rawContent[:120]}\n\n"
                     f"👉 To track: /pin {user.username}"
                 )
                 await bot.send_message(
@@ -409,7 +406,6 @@ async def monitor_pinned(bot: Bot):
 
     for username, user_id, last_tweet_id, last_following in pinned:
         try:
-            # Check new tweets
             user_obj = await api.user_by_login(username)
             if not user_obj:
                 continue
@@ -433,12 +429,11 @@ async def monitor_pinned(bot: Bot):
                     parse_mode="Markdown", disable_web_page_preview=True
                 )
 
-            # Check following count change
             current_following = user_obj.friendsCount
             if last_following and current_following > last_following:
                 new_follows = current_following - last_following
                 msg = (
-                    f"👀 *PINNED ACCOUNT FOLLOWED {new_follows} new account(s)*\n\n"
+                    f"👀 *PINNED ACCOUNT FOLLOWED {new_follows} NEW ACCOUNT(S)*\n\n"
                     f"👤 [@{username}](https://x.com/{username})\n"
                     f"🐦 Now following: {current_following:,}"
                 )
@@ -461,28 +456,29 @@ async def run_all_scans(bot: Bot):
     await run_feature2(bot)
     await run_feature3(bot)
     await run_feature4(bot)
+    logger.info("All scans complete.")
 
 # ── TELEGRAM COMMANDS ─────────────────────────────────────────────────────────
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "🔍 *Crypto Alpha Hunter Bot*\n\n"
         "Tracks new crypto projects, free mints, and pinned accounts on X.\n\n"
-        "*Feature 1 — New Crypto Account Discovery:*\n"
+        "*Feature 1 — New Crypto Account Discovery (under 30 days):*\n"
         "/addterm1 `<keyword>` — Add search term\n\n"
         "*Feature 2 — Keyword Account Search:*\n"
-        "/addterm2 `<keyword>` `<7days or 30days>` — Add search term\n\n"
+        "/addterm2 `<keyword>` `<7days or 30days>`\n\n"
         "*Feature 3 — Free Mint Tracker:*\n"
-        "Auto-runs. No setup needed.\n\n"
+        "Auto-runs every 15 mins. No setup needed.\n\n"
         "*Feature 4 — Established Account Tracker:*\n"
         "/addterm4 `<keyword>` — Add search term\n\n"
         "*Pinned Accounts:*\n"
-        "/pin `<@handle>` — Pin account to monitor posts + follows\n"
-        "/unpin `<@handle>` — Unpin account\n"
-        "/listpinned — See all pinned accounts\n\n"
+        "/pin `<handle>` — Monitor posts + follows\n"
+        "/unpin `<handle>` — Unpin\n"
+        "/listpinned — See all pinned\n\n"
         "*General:*\n"
         "/listterms — See all search terms\n"
-        "/removeterm `<term>` — Remove a search term\n"
-        "/scan — Run all scans right now\n"
+        "/removeterm `<term>` — Remove term\n"
+        "/scan — Run all scans now\n"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -508,7 +504,6 @@ async def cmd_addterm2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         term = " ".join(args[:-1])
     else:
         term = " ".join(args)
-
     added = add_search_term(term, feature=2, age_filter=age_filter)
     if added:
         await update.message.reply_text(f"✅ Added '{term}' to Feature 2 (filter: {age_filter}).")
@@ -551,7 +546,7 @@ async def cmd_listterms(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usage: /pin elonmusk")
+        await update.message.reply_text("Usage: /pin cryptoproject")
         return
     username = context.args[0].replace("@", "")
     added = add_pinned(username)
@@ -565,14 +560,14 @@ async def cmd_pin(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_unpin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("Usage: /unpin elonmusk")
+        await update.message.reply_text("Usage: /unpin cryptoproject")
         return
     username = context.args[0].replace("@", "")
     removed = remove_pinned(username)
     if removed:
         await update.message.reply_text(f"📌 Unpinned @{username}.")
     else:
-        await update.message.reply_text(f"@{username} not found in pinned list.")
+        await update.message.reply_text(f"@{username} not found.")
 
 async def cmd_listpinned(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pinned = get_pinned()
@@ -589,21 +584,17 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await run_all_scans(context.bot)
     await update.message.reply_text("✅ Scan complete.")
 
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await cmd_start(update, context)
-
 # ── MAIN ──────────────────────────────────────────────────────────────────────
 def main():
     init_db()
 
     async def post_init(app):
         await setup_account()
-        logger.info("X account logged in.")
 
     app = Application.builder().token(TELEGRAM_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("help", cmd_start))
     app.add_handler(CommandHandler("addterm1", cmd_addterm1))
     app.add_handler(CommandHandler("addterm2", cmd_addterm2))
     app.add_handler(CommandHandler("addterm4", cmd_addterm4))
@@ -614,7 +605,6 @@ def main():
     app.add_handler(CommandHandler("listpinned", cmd_listpinned))
     app.add_handler(CommandHandler("scan", cmd_scan))
 
-    # Run scans every 15 minutes
     scheduler = AsyncIOScheduler()
     scheduler.add_job(run_all_scans, "interval", minutes=15, args=[app.bot])
     scheduler.start()
