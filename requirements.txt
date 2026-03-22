@@ -1,4 +1,4 @@
-python-telegram-bot==20.3
+python-telegram-bot==21.0.1
 twscrape==0.12.0
 APScheduler==3.9.1
 
